@@ -1,0 +1,130 @@
+name: Generate Standalone SDM845 Kernel Source
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract-kernel:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Maximize Runner Space
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y git-core curl libxml2-utils python3
+
+      - name: Install Google repo tool
+        run: |
+          sudo curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
+            -o /usr/local/bin/repo
+          sudo chmod a+x /usr/local/bin/repo
+          repo --version
+
+      - name: Configure Git
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global color.ui false
+
+      - name: Initialize CodeLinaro Manifest
+        run: |
+          mkdir cl_workspace && cd cl_workspace
+          repo init \
+            --depth=1 \
+            -u https://git.codelinaro.org/clo/la/platform/manifest.git \
+            -b release \
+            -m LA.UM.10.3.r1-01700-sdm845.0.xml
+
+      - name: Sync Kernel Directory Only
+        run: |
+          cd cl_workspace
+          repo sync \
+            kernel/msm-4.9 \
+            -j4 -c \
+            --no-tags \
+            --no-clone-bundle \
+            --fail-fast
+
+      - name: Verify sync succeeded
+        run: |
+          if [ ! -d "cl_workspace/kernel/msm-4.9/arch" ]; then
+            echo "ERROR: kernel/msm-4.9 sync failed or is empty!"
+            exit 1
+          fi
+          echo "Sync OK — $(find cl_workspace/kernel/msm-4.9 -type f | wc -l) files"
+
+      - name: Clean Repo Root (Preserve .git & .github)
+        run: |
+          find . -maxdepth 1 \
+            ! -name '.' \
+            ! -name '..' \
+            ! -name '.git' \
+            ! -name '.github' \
+            ! -name 'cl_workspace' \
+            -exec rm -rf {} +
+
+      - name: Move Kernel Files to Root
+        run: |
+          cp -r cl_workspace/kernel/msm-4.9/* ./
+
+          find cl_workspace/kernel/msm-4.9/ \
+            -mindepth 1 -maxdepth 1 \
+            -name ".*" \
+            ! -name ".git" \
+            -exec cp -r {} ./ \;
+
+          rm -rf cl_workspace
+          echo "=== Root directory after move ==="
+          ls -la
+
+      - name: Show source statistics
+        run: |
+          echo "=== Kernel Source Statistics ==="
+          find . -not -path './.git/*' -not -path './.github/*' -type f | wc -l | xargs echo "Total files:"
+          echo ""
+          echo "=== Top-level directories ==="
+          for dir in arch block certs crypto drivers firmware fs include init ipc kernel lib mm net samples scripts security sound; do
+            if [ -d "$dir" ]; then
+              count=$(find "$dir" -type f | wc -l)
+              printf "  %-12s ->  %s files\n" "$dir/" "$count"
+            fi
+          done
+
+      - name: Commit and Push to Main
+        run: |
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit — kernel source already up to date."
+            exit 0
+          fi
+
+          git commit -m "Import caf sdm845 kernel from LA.UM.10.3.r1-01700-sdm845.0
+
+          SoC     : Qualcomm Snapdragon 845 (sdm845)
+          Version : Linux 4.9 (msm-4.9)
+          Arch    : arm64
+          Source  : CodeLinaro LA.UM.10.3.r1-01700-sdm845.0
+
+          Signed-off-by: github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+
+          git push origin HEAD:main
